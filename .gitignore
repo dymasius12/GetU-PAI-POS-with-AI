@@ -1,0 +1,27 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Google Cloud ADK
+mcp-toolbox/toolbox
+*.sqlite
+.env
+.env.local
+.DS_Store
+
+# Binary artifacts
+*.so
+*.dll
+*.bin
+*.dat
+*.db
+*.tar
+*.zip
+*.log
+
+# Node / JS
+node_modules/
+
+# VSCode
+.vscode/
