@@ -1,0 +1,254 @@
+sources:
+  coffee-pos-cloud-sql:
+    kind: cloud-sql-postgres
+    project: secure-petal-479703-g2
+    region: us-central1
+    instance: hoteldb-instance
+    database: postgres
+    user: postgres
+    password: "postgres"
+
+tools:
+  menu-by-name:
+    kind: postgres-sql
+    source: coffee-pos-cloud-sql
+    description: Search menu items by name with price and category.
+    parameters:
+      - name: name
+        type: string
+        description: Case-insensitive substring to match menu names.
+    statement: |
+      SELECT menu_id, name, price, category, active
+      FROM menus
+      WHERE name ILIKE '%' || $1 || '%'
+      ORDER BY category, name;
+
+  low-stock-ingredients:
+    kind: postgres-sql
+    source: coffee-pos-cloud-sql
+    description: List ingredients at or below their reorder thresholds.
+    parameters:
+      - name: limit_rows
+        type: integer
+        description: Maximum rows to return (set 0 for all).
+    statement: |
+      SELECT ingredient_id,
+             name,
+             uom,
+             stock_qty,
+             reorder_threshold,
+             cost_per_uom
+      FROM ingredients
+      WHERE stock_qty <= reorder_threshold
+      ORDER BY stock_qty ASC
+      LIMIT CASE WHEN $1::int <= 0 THEN ALL ELSE $1::int END;
+
+  sales-summary-range:
+    kind: postgres-sql
+    source: coffee-pos-cloud-sql
+    description: Aggregate orders, revenue, paid count, and average order value for a time window.
+    parameters:
+      - name: start_ts
+        type: string
+        description: Inclusive start timestamp (e.g., 2025-11-01T00:00:00Z).
+      - name: end_ts
+        type: string
+        description: Exclusive end timestamp (e.g., 2025-12-01T00:00:00Z).
+    statement: |
+      SELECT
+        COUNT(*) AS orders,
+        SUM(total_amount) AS revenue,
+        SUM(CASE WHEN is_paid THEN 1 ELSE 0 END) AS paid_orders,
+        AVG(total_amount) AS avg_order_value
+      FROM orders
+      WHERE created_at >= $1::timestamptz
+        AND created_at < $2::timestamptz;
+
+  top-items-range:
+    kind: postgres-sql
+    source: coffee-pos-cloud-sql
+    description: Top selling menu items by revenue within a time range.
+    parameters:
+      - name: start_ts
+        type: string
+        description: Inclusive start timestamp.
+      - name: end_ts
+        type: string
+        description: Exclusive end timestamp.
+      - name: limit_rows
+        type: integer
+        description: Number of rows to return.
+    statement: |
+      SELECT m.name,
+             SUM(oi.qty) AS qty_sold,
+             SUM(oi.qty * oi.price) AS revenue
+      FROM order_items oi
+      JOIN orders o ON oi.order_id = o.order_id
+      JOIN menus m ON oi.menu_id = m.menu_id
+      WHERE o.created_at >= $1::timestamptz
+        AND o.created_at < $2::timestamptz
+      GROUP BY m.name
+      ORDER BY revenue DESC
+      LIMIT $3::int;
+
+  category-mix-range:
+    kind: postgres-sql
+    source: coffee-pos-cloud-sql
+    description: Revenue and quantity mix by menu category in a time window.
+    parameters:
+      - name: start_ts
+        type: string
+        description: Inclusive start timestamp.
+      - name: end_ts
+        type: string
+        description: Exclusive end timestamp.
+      - name: limit_rows
+        type: integer
+        description: Number of categories to return.
+    statement: |
+      SELECT m.category,
+             SUM(oi.qty) AS qty_sold,
+             SUM(oi.qty * oi.price) AS revenue
+      FROM order_items oi
+      JOIN orders o ON oi.order_id = o.order_id
+      JOIN menus m ON oi.menu_id = m.menu_id
+      WHERE o.created_at >= $1::timestamptz
+        AND o.created_at < $2::timestamptz
+      GROUP BY m.category
+      ORDER BY revenue DESC
+      LIMIT $3::int;
+
+  peak-hours-range:
+    kind: postgres-sql
+    source: coffee-pos-cloud-sql
+    description: Busiest hours by order count and revenue for a time window.
+    parameters:
+      - name: start_ts
+        type: string
+        description: Inclusive start timestamp.
+      - name: end_ts
+        type: string
+        description: Exclusive end timestamp.
+      - name: limit_rows
+        type: integer
+        description: Number of hours to return.
+    statement: |
+      SELECT DATE_PART('hour', o.created_at) AS hour,
+             COUNT(*) AS orders,
+             SUM(o.total_amount) AS revenue
+      FROM orders o
+      WHERE o.created_at >= $1::timestamptz
+        AND o.created_at < $2::timestamptz
+      GROUP BY 1
+      ORDER BY orders DESC
+      LIMIT $3::int;
+
+  ingredient-usage-range:
+    kind: postgres-sql
+    source: coffee-pos-cloud-sql
+    description: Ingredient consumption based on menu recipes for a time window.
+    parameters:
+      - name: start_ts
+        type: string
+        description: Inclusive start timestamp.
+      - name: end_ts
+        type: string
+        description: Exclusive end timestamp.
+      - name: limit_rows
+        type: integer
+        description: Number of ingredients to return.
+    statement: |
+      SELECT ing.ingredient_id,
+             ing.name,
+             ing.uom,
+             SUM(oi.qty * mr.qty_required) AS used_qty
+      FROM order_items oi
+      JOIN orders o ON oi.order_id = o.order_id
+      JOIN menu_recipes mr ON oi.menu_id = mr.menu_id
+      JOIN ingredients ing ON mr.ingredient_id = ing.ingredient_id
+      WHERE o.created_at >= $1::timestamptz
+        AND o.created_at < $2::timestamptz
+      GROUP BY ing.ingredient_id, ing.name, ing.uom
+      ORDER BY used_qty DESC
+      LIMIT $3::int;
+
+  order-details:
+    kind: postgres-sql
+    source: coffee-pos-cloud-sql
+    description: Fetch a single order with items and totals.
+    parameters:
+      - name: order_id
+        type: integer
+        description: Order ID.
+    statement: |
+      SELECT o.order_id,
+             o.total_amount,
+             o.status,
+             o.is_paid,
+             o.payment_method,
+             o.paid_at,
+             o.created_at,
+             oi.order_item_id,
+             m.name AS menu_name,
+             oi.qty,
+             oi.price,
+             oi.qty * oi.price AS line_total
+      FROM orders o
+      JOIN order_items oi ON o.order_id = oi.order_id
+      JOIN menus m ON oi.menu_id = m.menu_id
+      WHERE o.order_id = $1::bigint
+      ORDER BY oi.order_item_id;
+
+  recent-orders:
+    kind: postgres-sql
+    source: coffee-pos-cloud-sql
+    description: List recent orders with totals and payment status.
+    parameters:
+      - name: limit_rows
+        type: integer
+        description: Number of orders to return.
+    statement: |
+      SELECT order_id,
+             total_amount,
+             status,
+             is_paid,
+             payment_method,
+             created_at
+      FROM orders
+      ORDER BY created_at DESC
+      LIMIT $1::int;
+
+  inventory-ledger-recent:
+    kind: postgres-sql
+    source: coffee-pos-cloud-sql
+    description: Latest inventory ledger entries for troubleshooting stock movements.
+    parameters:
+      - name: limit_rows
+        type: integer
+        description: Number of ledger rows to return.
+    statement: |
+      SELECT l.ledger_id,
+             l.ingredient_id,
+             ing.name AS ingredient_name,
+             l.delta_qty,
+             l.source,
+             l.ref_order_id,
+             l.created_by,
+             l.created_at
+      FROM inventory_ledger l
+      JOIN ingredients ing ON l.ingredient_id = ing.ingredient_id
+      ORDER BY l.created_at DESC
+      LIMIT $1::int;
+
+toolsets:
+  coffee_pos_toolset:
+    - menu-by-name
+    - low-stock-ingredients
+    - sales-summary-range
+    - top-items-range
+    - category-mix-range
+    - peak-hours-range
+    - ingredient-usage-range
+    - order-details
+    - recent-orders
+    - inventory-ledger-recent
